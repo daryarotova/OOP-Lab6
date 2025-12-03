@@ -1,0 +1,179 @@
+#include "../include/arena.h"
+#include "../include/factory.h"
+#include "../include/combat_visitor.h"
+#include <iostream>
+#include <memory>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <stdexcept>
+
+Arena::Arena(int width, int height) {
+    if (width > MAX_WIDTH || height > MAX_HEIGHT) {
+        throw std::out_of_range("Arena size exceeds maximum limits.");
+    }
+    if (width < 0 || height < 0) {
+        throw std::invalid_argument("Arena dimensions cannot be negative.");
+    }
+    this->width_ = width;
+    this->height_ = height;
+}
+
+void Arena::addNpc(std::unique_ptr<Npc> npc) {
+    const std::string name = npc->getName();
+
+    if (npc->getX() < 0 || npc->getX() > width_ ||
+        npc->getY() < 0 || npc->getY() > height_) {
+        throw std::out_of_range("NPC position is out of arena bounds.");
+    }
+
+    if (npcs_.find(name) != npcs_.end()) {
+        throw std::invalid_argument("NPC with name '" + name + "' already exists.");
+    }
+    
+    npcs_[name] = std::move(npc);
+}
+
+void Arena::createAndAddNpc(const std::string& type, 
+                            const std::string& name, 
+                            int x, int y) {
+    auto npc = NpcFactory::createNpc(type, name, x, y);
+    addNpc(std::move(npc));
+}
+
+void Arena::printAllNpcs() const {
+    if (npcs_.empty()) {
+        std::cout << "Arena is empty." << std::endl;
+        return;
+    }
+    
+    std::cout << "NPCs on arena (" << npcs_.size() << " total):" << std::endl;
+    for (const auto& pair : npcs_) {
+        std::cout << "  " << *(pair.second) << std::endl;
+    }
+}
+
+size_t Arena::getNpcCount() const {
+    return npcs_.size();
+}
+
+void Arena::saveToFile(const std::string& filename) const {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file for writing: " + filename);
+    }
+
+    for (const auto& [name, npc] : npcs_) {
+        file << npc->getType() << " "
+             << npc->getName() << " "
+             << npc->getX() << " "
+             << npc->getY() << std::endl;
+    }
+    
+    std::cout << "Saved " << npcs_.size() << " NPCs to file: " << filename << std::endl;
+}
+
+void Arena::loadFromFile(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file for reading: " + filename);
+    }
+
+    std::string line;
+    int loadedCount = 0;
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+
+        try {
+            auto npc = NpcFactory::createFromString(line);
+            addNpc(std::move(npc));
+            loadedCount++;
+        } catch (const std::exception& e) {
+            std::cerr << "Error loading NPC from line: " << line 
+                      << " - " << e.what() << std::endl;
+        }
+    }
+    
+    std::cout << "Loaded " << loadedCount << " NPCs from file: " << filename << std::endl;
+}
+
+void Arena::clear() {
+    npcs_.clear();
+    std::cout << "Arena cleared." << std::endl;
+}
+
+void Arena::addObserver(std::shared_ptr<Observer> observer) {
+    observers_.push_back(observer);
+}
+
+void Arena::removeObserver(std::shared_ptr<Observer> observer) {
+    auto it = std::find(observers_.begin(), observers_.end(), observer);
+    if (it != observers_.end()) {
+        observers_.erase(it);
+    }
+}
+
+void Arena::notifyObservers(const std::string& event) {
+    for (auto& observer : observers_) {
+        observer->notify(event);
+    }
+}
+
+void Arena::startBattle(double range) {
+    if (range < 0) {
+        throw std::invalid_argument("Battle range cannot be negative.");
+    }
+    
+    CombatVisitor visitor;
+    std::vector<std::string> toRemove;
+    int battlesCount = 0;
+
+    std::cout << "Starting battle with range: " << range << std::endl;
+    std::cout << "NPCs before battle: " << npcs_.size() << std::endl;
+
+    for (auto& [name1, npc1] : npcs_) {
+        for (auto& [name2, npc2] : npcs_) {
+            if (name1 == name2) continue;
+            if (name1 > name2) continue;
+
+            double distance = npc1->distanceTo(*npc2);
+            if (distance > range) continue;
+            
+            bool npc1KillsNpc2 = visitor.canKill(npc1.get(), npc2.get());
+            bool npc2KillsNpc1 = visitor.canKill(npc2.get(), npc1.get());
+            
+            if (npc1KillsNpc2 && npc2KillsNpc1) {
+                std::string event = npc1->getName() + " (" + npc1->getType() + 
+                                   ") and " + npc2->getName() + " (" + npc2->getType() + 
+                                   ") killed each other";
+                notifyObservers(event);
+                toRemove.push_back(name1);
+                toRemove.push_back(name2);
+                battlesCount++;
+            } else if (npc1KillsNpc2) {
+                std::string event = npc1->getName() + " (" + npc1->getType() + 
+                                   ") killed " + npc2->getName() + " (" + npc2->getType() + ")";
+                notifyObservers(event);
+                toRemove.push_back(name2);
+                battlesCount++;
+            } else if (npc2KillsNpc1) {
+                std::string event = npc2->getName() + " (" + npc2->getType() + 
+                                   ") killed " + npc1->getName() + " (" + npc1->getType() + ")";
+                notifyObservers(event);
+                toRemove.push_back(name1);
+                battlesCount++;
+            }
+        }
+    }
+    
+    std::sort(toRemove.begin(), toRemove.end());
+    toRemove.erase(std::unique(toRemove.begin(), toRemove.end()), toRemove.end());
+    
+    for (const auto& name : toRemove) {
+        npcs_.erase(name);
+    }
+    
+    std::cout << "Battle finished. Fights: " << battlesCount 
+              << ", NPCs after battle: " << npcs_.size() << std::endl;
+}
